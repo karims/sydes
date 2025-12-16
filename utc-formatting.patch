@@ -1,0 +1,30 @@
+diff --git a/src/sydes/cli.py b/src/sydes/cli.py
+index 3b2a7c1..d91a2ef 100644
+--- a/src/sydes/cli.py
++++ b/src/sydes/cli.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+
+ from pathlib import Path
++from datetime import datetime, timezone
+ from typing import Optional
+
+ import typer
+@@ -129,7 +130,12 @@ def scans_list(
+     table.add_column("SCAN_ID", no_wrap=True)
+     table.add_column("CREATED_AT (UTC)", no_wrap=True)
+     table.add_column("GIT_COMMIT", no_wrap=True)
+
+-    for s in scans:
+-        table.add_row(str(s["scan_id"]), str(s["created_at"]), s["git_commit"] or "-")
++    for s in scans:
++        created_utc = datetime.fromtimestamp(
++            s["created_at"], tz=timezone.utc
++        ).strftime("%Y-%m-%dT%H:%M:%SZ")
++        table.add_row(
++            str(s["scan_id"]),
++            created_utc,
++            s["git_commit"] or "-",
++        )
+
+     console.print(table)

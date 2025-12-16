@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,12 @@ app.add_typer(endpoints_app, name="endpoints")
 graph_app = typer.Typer(no_args_is_help=True)
 app.add_typer(graph_app, name="graph")
 
+scans_app = typer.Typer(no_args_is_help=True)
+app.add_typer(scans_app, name="scans")
+
+structure_app = typer.Typer(no_args_is_help=True)
+app.add_typer(structure_app, name="structure")
+
 console = Console()
 
 
@@ -28,14 +35,25 @@ console = Console()
 def analyze(
     repo: str = typer.Argument(..., help="Path to the repo to analyze"),
     max_files: Optional[int] = typer.Option(None, help="Limit scanned files (debug)"),
+    git: bool = typer.Option(False, help="Only scan files changed in git"),
+    git_base: str = typer.Option("HEAD~1", help="Git base revision (used with --git)"),
+    git_to: str = typer.Option("HEAD", help="Git target revision (used with --git)"),
 ) -> None:
+
     repo_path = Path(repo).expanduser().resolve()
     if not repo_path.exists():
         raise typer.BadParameter(f"Repo path does not exist: {repo_path}")
     if not repo_path.is_dir():
         raise typer.BadParameter(f"Repo path is not a directory: {repo_path}")
 
-    result = run_analyze(repo_path, max_files=max_files)
+    result = run_analyze(
+        repo_path,
+        max_files=max_files,
+        git_mode=git,
+        git_base=git_base,
+        git_to=git_to,
+    )
+
 
     console.print(f"[bold green]sydes[/bold green] analyze: {repo_path}")
     console.print(
@@ -45,7 +63,7 @@ def analyze(
     console.print(f"Candidate API files: {len(result.candidate_files)}")
 
     console.print("")
-    console.print(f"Routes found: [bold]{len(result.routes)}[/bold]")
+    console.print(f"Routes found (changed files only): [bold]{len(result.routes)}[/bold]")
     for r in result.routes[:50]:
         console.print(f"  {r.method:<6} {r.path:<35} -> {r.handler_name}")
     if len(result.routes) > 50:
@@ -55,8 +73,11 @@ def analyze(
     console.print(f"Changed files: {result.changed_files}")
     console.print(f"Inserted routes: {result.inserted_routes}")
     console.print(f"Removed files: {result.removed_files}")
-    console.print("")
-    console.print("Tip: run [bold]sydes endpoints list <repo>[/bold] to list everything from the DB.")
+    if result.scan_id is not None:
+        console.print(f"Scan saved: {result.scan_id}")
+        console.print("Tip: run [bold]sydes diff <repo> --last[/bold] to see changes.")
+    else:
+        console.print("[yellow]Scan snapshot failed (analyze still succeeded).[/yellow]")
 
 
 @endpoints_app.command("list")
@@ -110,6 +131,109 @@ def endpoints_list(
     console.print(table)
 
 
+@scans_app.command("list")
+def scans_list(
+    repo: str = typer.Argument(..., help="Path to the repo"),
+    limit: int = typer.Option(20, help="How many scans to show"),
+) -> None:
+    repo_path = Path(repo).expanduser().resolve()
+    db_path = SydesSQLiteStore.db_path_for_repo(repo_path)
+    store = SydesSQLiteStore(db_path, repo_root=repo_path)
+
+    scans = store.list_scans(limit=limit)
+
+    console.print(f"[bold]DB:[/bold] {db_path}")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("SCAN_ID", no_wrap=True)
+    table.add_column("CREATED_AT (UTC)", no_wrap=True)
+    table.add_column("GIT_COMMIT")
+
+    for s in scans:
+        created_utc = datetime.fromtimestamp(int(s.created_at), tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        table.add_row(str(s.scan_id), created_utc, s.git_commit or "-")
+
+    console.print(table)
+
+
+@app.command()
+def diff(
+    repo: str = typer.Argument(..., help="Path to the repo"),
+    last: bool = typer.Option(False, help="Diff latest scan vs previous scan"),
+    from_scan: Optional[int] = typer.Option(None, help="From scan_id"),
+    to_scan: Optional[int] = typer.Option(None, help="To scan_id"),
+    format: str = typer.Option("table", help="Output format: table|json"),
+    limit: int = typer.Option(50, help="Max rows per section to print"),
+) -> None:
+    repo_path = Path(repo).expanduser().resolve()
+    db_path = SydesSQLiteStore.db_path_for_repo(repo_path)
+    store = SydesSQLiteStore(db_path, repo_root=repo_path)
+
+    if last:
+        scans = store.list_scans(limit=2)
+        if len(scans) < 2:
+            raise typer.BadParameter(
+                "Only 1 scan found for this repo.\n\n"
+                "To diff changes:\n"
+                "  1) Run: sydes analyze <repo>\n"
+                "  2) Make code changes\n"
+                "  3) Run: sydes analyze <repo>\n"
+                "  4) Then: sydes diff <repo> --last\n"
+            )
+        to_id = scans[0].scan_id
+        from_id = scans[1].scan_id
+    else:
+        if from_scan is None or to_scan is None:
+            raise typer.BadParameter("Provide --last OR both --from-scan and --to-scan.")
+        from_id = int(from_scan)
+        to_id = int(to_scan)
+
+    d = store.diff_scans(from_id, to_id)
+
+    if format.lower() == "json":
+        console.print(json.dumps({"from": from_id, "to": to_id, **d}, indent=2))
+        return
+
+    console.print(f"[bold]DB:[/bold] {db_path}")
+    console.print(f"[bold]Diff[/bold] from scan {from_id} -> {to_id}")
+    console.print("")
+
+    def _print_section(title: str, rows: list[dict], cols: list[str]) -> None:
+        console.print(f"[bold]{title}:[/bold] {len(rows)}")
+        t = Table(show_header=True, header_style="bold")
+        for c in cols:
+            t.add_column(c)
+        for r in rows[:limit]:
+            t.add_row(*[str(r.get(c, "")) for c in cols])
+        console.print(t)
+        if len(rows) > limit:
+            console.print(f"  … and {len(rows) - limit} more")
+        console.print("")
+
+    _print_section(
+        "Added",
+        d["added"],
+        ["method", "http_path", "rel_path", "handler_name"],
+    )
+    _print_section(
+        "Removed",
+        d["removed"],
+        ["method", "http_path", "rel_path", "handler_name"],
+    )
+    _print_section(
+        "Moved",
+        d["moved"],
+        ["method", "http_path", "from_rel_path", "to_rel_path", "from_handler", "to_handler"],
+    )
+    _print_section(
+        "Handler changed",
+        d["handler_changed"],
+        ["method", "http_path", "rel_path", "from_handler", "to_handler"],
+    )
+
+
+# graph commands you already have (unchanged from Phase 2.2)
 @graph_app.command("stats")
 def graph_stats(
     repo: str = typer.Argument(..., help="Path to the repo"),
@@ -119,7 +243,7 @@ def graph_stats(
     db_path = SydesSQLiteStore.db_path_for_repo(repo_path)
     store = SydesSQLiteStore(db_path, repo_root=repo_path)
 
-    rows = store.list_routes(limit=100_000)  # stats wants all routes; DB query is cheap
+    rows = store.list_routes(limit=100_000)
     result = build_endpoint_graph(rows)
     g = result.graph
 
@@ -135,94 +259,55 @@ def graph_stats(
     console.print(f"Nodes: endpoints={endpoint_count}, files={file_count}, handlers={handler_count}")
     console.print(f"Edges: DECLARES={declares_edges}, HANDLES={handles_edges}")
 
-    # Top files by endpoints declared
-    from collections import Counter
 
-    file_to_endpoints = Counter()
-    handler_to_endpoints = Counter()
-
-    # Build quick counts from edges
-    for e in g.edges:
-        if e.type == "DECLARES":
-            # src=file:..., dst=endpoint:...
-            file_to_endpoints[e.src] += 1
-        elif e.type == "HANDLES":
-            handler_to_endpoints[e.src] += 1
-
-    console.print("")
-    console.print(f"[bold]Top files by endpoints declared (limit {limit}):[/bold]")
-    for fid, cnt in file_to_endpoints.most_common(limit):
-        label = g.nodes[fid].label if fid in g.nodes else fid
-        console.print(f"  {cnt:>4}  {label}")
-
-    console.print("")
-    console.print(f"[bold]Top handlers by endpoints handled (limit {limit}):[/bold]")
-    for hid, cnt in handler_to_endpoints.most_common(limit):
-        # handler label is just handler_name; still useful
-        label = g.nodes[hid].label if hid in g.nodes else hid
-        console.print(f"  {cnt:>4}  {label}")
-
-
-@graph_app.command("export")
-def graph_export(
+@structure_app.command("export")
+def structure_export(
     repo: str = typer.Argument(..., help="Path to the repo"),
-    format: str = typer.Option("json", help="Export format: json|dot"),
-    out: Optional[str] = typer.Option(None, help="Output path (default: print to stdout)"),
-    limit: int = typer.Option(200_000, help="Max routes to load for export (safety)"),
+    format: str = typer.Option("table", help="Output format: table|json"),
 ) -> None:
     repo_path = Path(repo).expanduser().resolve()
     db_path = SydesSQLiteStore.db_path_for_repo(repo_path)
     store = SydesSQLiteStore(db_path, repo_root=repo_path)
 
-    rows = store.list_routes(limit=limit)
+    rows = store.list_routes(limit=100_000)
     result = build_endpoint_graph(rows)
     g = result.graph
 
-    fmt = format.lower().strip()
-    if fmt not in ("json", "dot"):
-        raise typer.BadParameter("format must be one of: json, dot")
+    console.print(f"[bold]DB:[/bold] {db_path}")
+    ts = int(result.generated_at)
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    console.print(f"[bold]Graph generated_at:[/bold] {dt}")
 
-    if fmt == "json":
-        payload = {
-            "repo": str(repo_path),
-            "db": str(db_path),
-            "generated_at": result.generated_at,
-            "nodes": [
-                {"id": n.id, "type": n.type, "label": n.label}
-                for n in sorted(g.nodes.values(), key=lambda x: (x.type, x.id))
-            ],
-            "edges": [
-                {"src": e.src, "dst": e.dst, "type": e.type}
-                for e in g.edges
-            ],
-        }
-        text = json.dumps(payload, indent=2)
-    else:
-        # DOT (Graphviz) export
-        lines = []
-        lines.append("digraph sydes {")
-        lines.append('  rankdir="LR";')
-        lines.append('  node [shape="box"];')
+    if format.lower() == "json":
+        console.print(json.dumps(result.to_dict(), indent=2))
+        return
 
-        # Grouping by type with different shapes (still deterministic)
-        for node in sorted(g.nodes.values(), key=lambda x: (x.type, x.id)):
-            # Keep IDs safe for DOT: quote them
-            label = node.label.replace('"', '\\"')
-            lines.append(f'  "{node.id}" [label="{label}"];')
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("TYPE", no_wrap=True)
+    table.add_column("NAME")
+    table.add_column("DEGREE", no_wrap=True)
 
-        for e in g.edges:
-            lines.append(f'  "{e.src}" -> "{e.dst}" [label="{e.type}"];')
+    # Compute degree (how many edges touch each node)
+    deg: dict[str, int] = {nid: 0 for nid in g.nodes.keys()}
+    for e in g.edges:
+        # handle common edge field names safely
+        src = getattr(e, "src", None) or getattr(e, "from_id", None) or getattr(e, "from_node", None)
+        dst = getattr(e, "dst", None) or getattr(e, "to_id", None) or getattr(e, "to_node", None)
 
-        lines.append("}")
-        text = "\n".join(lines)
+        if src in deg:
+            deg[src] += 1
+        if dst in deg:
+            deg[dst] += 1
 
-    if out:
-        out_path = Path(out).expanduser()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(text, encoding="utf-8")
-        console.print(f"[bold green]Wrote[/bold green] {fmt} graph to: {out_path}")
-    else:
-        console.print(text)
+    for n in g.nodes.values():
+        table.add_row(
+            n.type,
+            str(getattr(n, "name", n.id)),
+            str(deg.get(n.id, 0)),
+        )
+
+
+    console.print(table)
 
 
 @app.command()
