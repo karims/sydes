@@ -14,24 +14,40 @@ from sydes.store.sqlite_store import SydesSQLiteStore
 from sydes.graph.builder import build_endpoint_graph
 
 
-app = typer.Typer(no_args_is_help=True, add_completion=False)
+app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    help="sydes — System Design Explorer for backend codebases"
+)
 
-endpoints_app = typer.Typer(no_args_is_help=True)
+endpoints_app = typer.Typer(
+    no_args_is_help=True,
+    help="Explore extracted API endpoints from the stored system model"
+)
 app.add_typer(endpoints_app, name="endpoints")
 
-graph_app = typer.Typer(no_args_is_help=True)
+graph_app = typer.Typer(
+    no_args_is_help=True,
+    help="Inspect the internal endpoint graph representation"
+)
 app.add_typer(graph_app, name="graph")
 
-scans_app = typer.Typer(no_args_is_help=True)
+scans_app = typer.Typer(
+    no_args_is_help=True,
+    help="View and manage saved scan snapshots for a repository"
+)
 app.add_typer(scans_app, name="scans")
 
-structure_app = typer.Typer(no_args_is_help=True)
+structure_app = typer.Typer(
+    no_args_is_help=True,
+    help="View a human-readable structural summary of the backend system"
+)
 app.add_typer(structure_app, name="structure")
 
 console = Console()
 
 
-@app.command()
+@app.command(help="Scan a repository to extract API endpoints and store system metadata")
 def analyze(
     repo: str = typer.Argument(..., help="Path to the repo to analyze"),
     max_files: Optional[int] = typer.Option(None, help="Limit scanned files (debug)"),
@@ -80,7 +96,7 @@ def analyze(
         console.print("[yellow]Scan snapshot failed (analyze still succeeded).[/yellow]")
 
 
-@endpoints_app.command("list")
+@endpoints_app.command("list", help="List API endpoints with optional filters")
 def endpoints_list(
     repo: str = typer.Argument(..., help="Path to the repo"),
     method: Optional[str] = typer.Option(None, help="Filter by HTTP method (GET/POST/...)"),
@@ -157,7 +173,7 @@ def scans_list(
     console.print(table)
 
 
-@app.command()
+@app.command(help="Compare two scans to see how API endpoints changed")
 def diff(
     repo: str = typer.Argument(..., help="Path to the repo"),
     last: bool = typer.Option(False, help="Diff latest scan vs previous scan"),
@@ -234,7 +250,7 @@ def diff(
 
 
 # graph commands you already have (unchanged from Phase 2.2)
-@graph_app.command("stats")
+@graph_app.command("stats", help="Show high-level statistics about the endpoint graph")
 def graph_stats(
     repo: str = typer.Argument(..., help="Path to the repo"),
     limit: int = typer.Option(10, help="How many top files/handlers to show"),
@@ -260,7 +276,10 @@ def graph_stats(
     console.print(f"Edges: DECLARES={declares_edges}, HANDLES={handles_edges}")
 
 
-@structure_app.command("export")
+@structure_app.command(
+    "export",
+    help="Export a file-level structural summary derived from the endpoint graph"
+)
 def structure_export(
     repo: str = typer.Argument(..., help="Path to the repo"),
     format: str = typer.Option("table", help="Output format: table|json"),
