@@ -8,6 +8,7 @@ import json
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from sydes.orchestrator.pipeline import run_analyze
 from sydes.store.sqlite_store import SydesSQLiteStore
@@ -260,6 +261,15 @@ def graph_stats(
     store = SydesSQLiteStore(db_path, repo_root=repo_path)
 
     rows = store.list_routes(limit=100_000)
+    if not rows:
+        console.print(
+            Text("No analysis found for repository: ", style="red")
+            + Text(str(repo_path))
+        )
+        console.print("")
+        console.print("Run this first:")
+        console.print(Text(f"  sydes analyze {repo}", style="bold"))
+        raise typer.Exit(code=2)
     result = build_endpoint_graph(rows)
     g = result.graph
 
@@ -289,6 +299,17 @@ def structure_export(
     store = SydesSQLiteStore(db_path, repo_root=repo_path)
 
     rows = store.list_routes(limit=100_000)
+    # Guard: require at least one analyzed route
+    if not rows:
+        console.print(
+            Text("No analysis found for repository: ", style="red")
+            + Text(str(repo_path))
+        )
+        console.print("")
+        console.print("Run this first:")
+        console.print(Text(f"  sydes analyze {repo}", style="bold"))
+        raise typer.Exit(code=2)
+
     result = build_endpoint_graph(rows)
     g = result.graph
 
@@ -319,14 +340,23 @@ def structure_export(
             deg[dst] += 1
 
     for n in g.nodes.values():
-        table.add_row(
-            n.type,
-            str(getattr(n, "name", n.id)),
-            str(deg.get(n.id, 0)),
-        )
-
+        table.add_row(n.type, pretty_node_name(n), str(deg.get(n.id, 0)))
+        # table.add_row(
+        #     n.type,
+        #     str(getattr(n, "name", n.id)),
+        #     str(deg.get(n.id, 0)),
+        # )
 
     console.print(table)
+
+def pretty_node_name(n) -> str:
+    name = str(getattr(n, "name", n.id))
+    # strip common prefixes
+    for prefix in ("endpoint:", "file:", "handler:"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
 
 
 @app.command()
