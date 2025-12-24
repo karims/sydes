@@ -9,13 +9,14 @@ class EndpointSpec:
     """
     Canonical representation of a single API endpoint.
 
-    This is the normalized form used by test planning and generation.
+    Deterministic, minimal contract used by Phase 4 planning + generation.
     """
 
+    id: str                     # stable identity (sha1)
     method: str                 # GET, POST, ...
     path: str                   # /users/{id}
-    handler: str                # function or handler name
-    file_path: str              # relative path in repo
+    handler: str                # best-effort handler name (can be derived)
+    file_path: str              # repo-relative path (forward slashes)
     framework: str              # fastapi, express, ...
     source: str                 # ast, regex, etc.
 
